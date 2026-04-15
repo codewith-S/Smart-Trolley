@@ -64,5 +64,13 @@ Electronics & Computer Engineering Student
 
 Output Images 
 
-<img width="900" height="1600" alt="IMG-20251120-WA0017 jpg" src="https://github.com/user-attachments/assets/f59c1381-805d-46ad-a847-33be1fc88008" />
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/b2247f8d-be2d-4bc8-b9a8-7274bbafdf2a" />
+<img width="1600" height="1200" alt="image" src="https://github.com/user-attachments/assets/df36053a-151c-4cbb-8730-ffcb72446531" />
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/c238bae6-3ce6-40e6-8209-f061a78c450d" />
+<img width="1600" height="1200" alt="image" src="https://github.com/user-attachments/assets/f776cf56-ec07-4c35-a4b6-90b48342c708" />
+<img width="1200" height="1600" alt="image" src="https://github.com/user-attachments/assets/81cc9cf0-b8fe-4b1c-a2a3-82f449fbf9bb" />
+
+
+
+
 
