@@ -1,0 +1,190 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <LiquidCrystal_I2C.h>
+#include <EEPROM.h> // For storing UIDs on the ESP32
+
+// --- PIN DEFINITIONS ---
+#define RST_PIN 22 // Reset Pin for MFRC522 (ESP32 GPIO 22)
+#define SS_PIN 21  // SPI Slave Select Pin for MFRC522 (ESP32 GPIO 21)
+#define BUZZER_PIN 18 // Buzzer Pin (ESP32 GPIO 18)
+#define LED_RED_PIN 17
+#define LED_GREEN_PIN 16
+
+// MFRC522 Initialization
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// Liquid Crystal I2C Initialization
+// Common address is 0x27 or 0x3F. Check your module.
+// 16, 2 means 16 characters wide, 2 rows.
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// --- EEPROM and Tag Management ---
+#define EEPROM_SIZE 512
+#define MAX_TAGS 10 // Max 10 UIDs can be stored (4 bytes each = 40 bytes)
+
+// --- STATE MACHINE DEFINITIONS (The missing variables) ---
+// Note: Changed from WAIT_TAG_ADD to WAIT_TAG_FOR_ADD as suggested by compiler
+enum SystemState {
+    STATE_NORMAL,
+    WAIT_TAG_FOR_ADD,
+    WAIT_TAG_FOR_REMOVE
+};
+
+// --- GLOBAL VARIABLES (The missing variables) ---
+SystemState state = STATE_NORMAL;
+unsigned long stateStartTime = 0; // CORRECTED: The previously missing variable
+unsigned long buttonPressTime = 0;
+bool buttonIsPressed = false;
+byte storedUids[MAX_TAGS][4]; // Array to hold stored UIDs (4 bytes each)
+int tagCount = 0;
+
+// --- TIMING CONSTANTS ---
+const unsigned long TIMEOUT_MS = 10000; // 10 seconds to add/remove a tag
+const unsigned long SUCCESS_HOLD_MS = 3000; // 3 seconds success hold time
+
+// --- FUNCTION PROTOTYPES ---
+void loadTagsFromEEPROM();
+void saveTagsToEEPROM();
+bool isTagPresent(byte *uid);
+bool addTag(byte *uid);
+bool removeTag(byte *uid);
+void uidToHex(byte *uid, char *hexString);
+void buzz(int duration, int frequency);
+void displayMessage(const char *line1, const char *line2 = "", int delay_ms = 0);
+void handleStateChange();
+
+// =========================================================================
+// SETUP
+// =========================================================================
+void setup() {
+    Serial.begin(115200);
+    SPI.begin();
+    mfrc522.PCD_Init();
+
+    pinMode(BUZZER_PIN, OUTPUT);
+    pinMode(LED_RED_PIN, OUTPUT);
+    pinMode(LED_GREEN_PIN, OUTPUT);
+
+    // Initialize EEPROM
+    if (!EEPROM.begin(EEPROM_SIZE)) {
+        Serial.println("Failed to initialize EEPROM");
+        // You might want to halt or handle this error
+    }
+    
+    // Initialize LCD
+    lcd.init();
+    lcd.backlight();
+    displayMessage(" System Initialized", "  Loading Tags...");
+    
+    loadTagsFromEEPROM();
+    delay(2000);
+}
+
+// =========================================================================
+// LOOP
+// =========================================================================
+void loop() {
+    // Check for a new tag presence
+    bool tagDetected = mfrc522.PICC_IsNewCardPresent() && mfrc522.PICC_ReadCardSerial();
+
+    // Check for timeout if in a configuration state
+    if ((state == WAIT_TAG_FOR_ADD || state == WAIT_TAG_FOR_REMOVE) && (millis() - stateStartTime >= TIMEOUT_MS)) {
+        displayMessage("Configuration", "   Timed Out!");
+        buzz(500, 100);
+        state = STATE_NORMAL;
+        delay(2000);
+    }
+    
+    // Check the button input here (assuming you have a button function not shown in error log)
+    handleStateChange();
+
+    // -------------------------------------------------------------------
+    // State Machine Logic
+    // -------------------------------------------------------------------
+
+    if (state == STATE_NORMAL) {
+        displayMessage("  Access Control", "  Tap Your Card");
+        if (tagDetected) {
+            byte *uid = mfrc522.uid.uidByte;
+            if (isTagPresent(uid)) {
+                displayMessage("Access Granted!", "Welcome!", 1500);
+                digitalWrite(LED_GREEN_PIN, HIGH);
+                buzz(100, 2000);
+                delay(100);
+                buzz(100, 2000);
+                digitalWrite(LED_GREEN_PIN, LOW);
+            } else {
+                displayMessage("Access Denied!", "Tag Not Found", 1500);
+                digitalWrite(LED_RED_PIN, HIGH);
+                buzz(500, 500);
+                digitalWrite(LED_RED_PIN, LOW);
+            }
+            mfrc522.PICC_HaltA();
+        }
+
+    // This section had the original errors (Lines 264-310 conceptual)
+    } else if (state == WAIT_TAG_FOR_ADD) { // CORRECTED: Was WAIT_TAG_ADD
+        displayMessage("ADD Tag Mode", "Tap & HOLD Tag");
+
+        if (tagDetected) {
+            // Start 3-second hold timer or reset if card is lifted
+            if (stateStartTime == 0) {
+                stateStartTime = millis(); // CORRECTED: Used stateStartTime
+            }
+            
+            if (millis() - stateStartTime >= SUCCESS_HOLD_MS) { // SUCCESS_HOLD_MS is 3000ms
+                if (addTag(mfrc522.uid.uidByte)) {
+                    displayMessage("Tag Added!", "Success!", 2000);
+                    buzz(100, 2000); delay(100); buzz(100, 2000); // 2 beeps
+                } else {
+                    displayMessage("Error!", "Tag Already Present", 2000);
+                    buzz(500, 500);
+                }
+                state = STATE_NORMAL;
+                stateStartTime = 0; // Reset timer for next use
+            }
+        } else {
+            // Card was present, but is now gone before hold time completed
+            if (stateStartTime != 0) {
+                stateStartTime = 0; // Reset timer
+            }
+        }
+        mfrc522.PICC_HaltA();
+
+    } else if (state == WAIT_TAG_FOR_REMOVE) { // CORRECTED: Was WAIT_TAG_REMOVE
+        displayMessage("REMOVE Tag Mode", "Tap & HOLD Tag");
+        
+        if (tagDetected) {
+            // Start 3-second hold timer or reset if card is lifted
+            if (stateStartTime == 0) {
+                stateStartTime = millis(); // CORRECTED: Used stateStartTime
+            }
+
+            if (millis() - stateStartTime >= SUCCESS_HOLD_MS) { // SUCCESS_HOLD_MS is 3000ms
+                if (removeTag(mfrc522.uid.uidByte)) {
+                    displayMessage("Tag Removed!", "Success!", 2000);
+                    // 4 beeps for removal success (different from 2 beeps for add)
+                    for(int i = 0; i < 4; i++) { buzz(50, 1500); delay(50); } 
+                } else {
+                    displayMessage("Error!", "Tag Not Found", 2000);
+                    buzz(500, 500);
+                }
+                state = STATE_NORMAL;
+                stateStartTime = 0; // Reset timer for next use
+            }
+        } else {
+            // Card was present, but is now gone before hold time completed
+            if (stateStartTime != 0) {
+                stateStartTime = 0; // Reset timer
+            }
+        }
+        mfrc522.PICC_HaltA();
+    }
+}
+
+// =========================================================================
+// Button/State Change Handling
+// =========================================================================
+void handleStateChange() {
+    // --- SIMULATED BUTTON LOGIC ---
+    // Assuming you have two buttons tied to GPIO 25 (ADD) and GPIO 26 (
