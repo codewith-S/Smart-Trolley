@@ -1,0 +1,281 @@
+// Smart Trolley — 2-IR sequence add/remove + RFID + I2C LCD + buzzer + LEDs
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <MFRC522.h>
+
+// ------------ PIN CONFIG ------------
+#define I2C_SDA_PIN 21
+#define I2C_SCL_PIN 22
+const int LCD_ADDRESS = 0x27;
+LiquidCrystal_I2C lcd(LCD_ADDRESS, 16, 2);
+
+#define SS_PIN 5
+#define RST_PIN 2
+MFRC522 mfrc522(SS_PIN, RST_PIN);
+
+// IR sensors (set as per your wiring)
+const int IR1_PIN = 25;   // first beam
+const int IR2_PIN = 14;   // second beam (you said you'll use 14)
+const int BUZZER_PIN = 27;
+const int GREEN_LED_PIN = 26;
+const int RED_LED_PIN = 32;
+
+// timing & windows
+const unsigned long SEQ_WINDOW = 3000UL;    // ms to complete IR sequence (IR1->IR2 or IR2->IR1)
+const unsigned long TAG_TIMEOUT_MS = 5000UL; // ms to tap RFID after sequence
+
+// ------------ STATES ------------
+enum TrolleyState {
+  IDLE,
+  WAIT_TAG_ADD,
+  WAIT_TAG_REMOVE,
+  UNKNOWN_OBJECT_ERROR,
+  CHECKOUT
+};
+TrolleyState state = IDLE;
+
+// ------------ ITEMS DB ------------
+struct Item { const char* uid; const char* name; int price; };
+Item itemDB[] = {
+  {"13206013", "Milk", 40},
+  {"892a6412", "Shoes", 350},
+  {"23d96513", "Aata", 450},
+  {"f152cea3", "Bag", 250},
+  {"d336b13", "Jeans", 400}
+};
+const int NUM_ITEMS = sizeof(itemDB) / sizeof(itemDB[0]);
+
+// ------------ COUNTERS ------------
+int productCount = 0;
+float finalBillTotal = 0.0;
+
+// ------------ SEQUENCE HELPERS ------------
+unsigned long seqStart = 0;
+bool waitingForSecond = false;
+bool waitingForFirst = false;
+unsigned long tagStartTime = 0;
+
+// previous states for edge detection
+int prev_ir1 = HIGH;
+int prev_ir2 = HIGH;
+
+// ------------- UTILITIES -------------
+void beep(int ms = 100) {
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(ms);
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void statusLed(bool green, bool red) {
+  digitalWrite(GREEN_LED_PIN, green ? HIGH : LOW);
+  digitalWrite(RED_LED_PIN, red ? HIGH : LOW);
+}
+
+String uidToString(MFRC522::Uid &uid) {
+  String s = "";
+  for (byte i = 0; i < uid.size; i++) {
+    byte b = uid.uidByte[i];
+    if (b < 0x10) s += "0";
+    s += String(b, HEX);
+  }
+  s.toLowerCase();
+  return s;
+}
+
+bool findItemByUid(const String &uid, String &name, int &price) {
+  for (int i=0;i<NUM_ITEMS;i++) {
+    if (uid.equalsIgnoreCase(itemDB[i].uid)) {
+      name = String(itemDB[i].name);
+      price = itemDB[i].price;
+      return true;
+    }
+  }
+  return false;
+}
+
+// show simple two-line text
+void showLCD(const char* l1, const char* l2) {
+  lcd.clear();
+  lcd.setCursor(0,0); lcd.print(l1);
+  lcd.setCursor(0,1); lcd.print(l2);
+}
+
+// ------------ SETUP ------------
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(IR1_PIN, INPUT);
+  pinMode(IR2_PIN, INPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(GREEN_LED_PIN, OUTPUT);
+  pinMode(RED_LED_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+  statusLed(false,false);
+
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Smart Trolley");
+  lcd.setCursor(0,1);
+  lcd.print("Init...");
+
+  SPI.begin();
+  mfrc522.PCD_Init();
+
+  delay(700);
+  lcd.clear();
+  lcd.setCursor(0,0); lcd.print("Ready");
+  lcd.setCursor(0,1); lcd.print("Place item...");
+  Serial.println("System ready");
+}
+
+// ------------ RFID read+process ------------
+bool readTagAndProcess(bool isAdd) {
+  if (!mfrc522.PICC_IsNewCardPresent()) return false;
+  if (!mfrc522.PICC_ReadCardSerial()) return false;
+
+  String uid = uidToString(mfrc522.uid);
+  Serial.print("UID: "); Serial.println(uid);
+
+  String itemName;
+  int price;
+  if (findItemByUid(uid, itemName, price)) {
+    if (isAdd) {
+      productCount++;
+      finalBillTotal += price;
+      lcd.clear();
+      lcd.print(itemName);
+      lcd.setCursor(0,1);
+      lcd.print("Rs:");
+      lcd.print(price);
+      lcd.print(" Added");
+      beep(80);
+      statusLed(true,false);
+      delay(200);
+      statusLed(false,false);
+      Serial.print("Added "); Serial.print(itemName); Serial.print(" Rs "); Serial.println(price);
+    } else {
+      // remove
+      if (productCount > 0) productCount--;
+      finalBillTotal -= price;
+      if (finalBillTotal < 0) finalBillTotal = 0;
+      lcd.clear();
+      lcd.print("Removed:");
+      lcd.setCursor(0,1);
+      lcd.print(itemName);
+      beep(80);
+      statusLed(false,true);
+      delay(200);
+      statusLed(false,false);
+      Serial.print("Removed "); Serial.print(itemName); Serial.print(" Rs "); Serial.println(price);
+    }
+  } else {
+    // unknown tag
+    lcd.clear();
+    lcd.print("Unknown Tag!");
+    lcd.setCursor(0,1); lcd.print(uid);
+    beep(200);
+    Serial.print("Unknown UID: "); Serial.println(uid);
+  }
+
+  mfrc522.PICC_HaltA();
+  mfrc522.PCD_StopCrypto1();
+  return true;
+}
+
+// ------------ MAIN LOOP ------------
+void loop() {
+  int ir1 = digitalRead(IR1_PIN); // HIGH=clear, LOW=blocked (adjust if your module is inverted)
+  int ir2 = digitalRead(IR2_PIN);
+
+  // Edge detection for IR1 -> start waiting for IR2 (ADD sequence)
+  if (prev_ir1 == HIGH && ir1 == LOW) {
+    waitingForSecond = true;
+    seqStart = millis();
+    Serial.println("IR1 blocked -> wait IR2");
+  }
+
+  // If waiting and IR2 falls within window -> trigger ADD wait for tag
+  if (waitingForSecond && prev_ir2 == HIGH && ir2 == LOW) {
+    if (millis() - seqStart <= SEQ_WINDOW) {
+      Serial.println("IR2 blocked after IR1 : ADD sequence");
+      lcd.clear(); lcd.print("TAP TAG TO ADD");
+      lcd.setCursor(0,1); lcd.print("5s...");
+      state = WAIT_TAG_ADD;
+      tagStartTime = millis();
+    }
+    waitingForSecond = false;
+  }
+
+  // Timeout waiting for IR2
+  if (waitingForSecond && (millis() - seqStart > SEQ_WINDOW)) {
+    waitingForSecond = false;
+  }
+
+  // Edge detection for IR2 -> start waiting for IR1 (REMOVE sequence)
+  if (prev_ir2 == HIGH && ir2 == LOW) {
+    waitingForFirst = true;
+    seqStart = millis();
+    Serial.println("IR2 blocked -> wait IR1");
+  }
+
+  // If waiting and IR1 falls within window -> trigger REMOVE wait for tag
+  if (waitingForFirst && prev_ir1 == HIGH && ir1 == LOW) {
+    if (millis() - seqStart <= SEQ_WINDOW) {
+      Serial.println("IR1 blocked after IR2 : REMOVE sequence");
+      lcd.clear(); lcd.print("TAP TAG TO REM");
+      lcd.setCursor(0,1); lcd.print("5s...");
+      state = WAIT_TAG_REMOVE;
+      tagStartTime = millis();
+    }
+    waitingForFirst = false;
+  }
+
+  // Timeout waiting for IR1
+  if (waitingForFirst && (millis() - seqStart > SEQ_WINDOW)) {
+    waitingForFirst = false;
+  }
+
+  // Handle waiting for tag states
+  if (state == WAIT_TAG_ADD) {
+    if (readTagAndProcess(true)) {
+      lcd.clear(); lcd.print("Scan Next Item");
+      lcd.setCursor(0,1); lcd.print("Items:"); lcd.print(productCount);
+      state = IDLE;
+    } else if (millis() - tagStartTime >= TAG_TIMEOUT_MS) {
+      lcd.clear(); lcd.print("UNKNOWN OBJECT");
+      lcd.setCursor(0,1); lcd.print("Timeout");
+      beep(200);
+      state = IDLE;
+    }
+  } else if (state == WAIT_TAG_REMOVE) {
+    if (readTagAndProcess(false)) {
+      lcd.clear(); lcd.print("Removed OK");
+      lcd.setCursor(0,1); lcd.print("Items:"); lcd.print(productCount);
+      state = IDLE;
+    } else if (millis() - tagStartTime >= TAG_TIMEOUT_MS) {
+      lcd.clear(); lcd.print("Unknown removal");
+      lcd.setCursor(0,1); lcd.print("Timeout");
+      beep(200);
+      state = IDLE;
+    }
+  } else {
+    // IDLE display refresh
+    static unsigned long lastDisp = 0;
+    if (millis() - lastDisp > 800) {
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Items:"); lcd.print(productCount);
+      lcd.setCursor(0,1);
+      lcd.print("Total Rs:"); lcd.print(finalBillTotal, 0);
+      lastDisp = millis();
+    }
+  }
+
+  prev_ir1 = ir1;
+  prev_ir2 = ir2;
+  delay(40); // small debounce
+}
