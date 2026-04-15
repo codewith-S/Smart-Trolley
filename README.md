@@ -61,4 +61,8 @@ Author
 
 Shrishailya Jangam
 Electronics & Computer Engineering Student
-LED and buzzer indicate error
+
+Output Images 
+
+<img width="900" height="1600" alt="IMG-20251120-WA0017 jpg" src="https://github.com/user-attachments/assets/f59c1381-805d-46ad-a847-33be1fc88008" />
+
